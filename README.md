@@ -201,7 +201,9 @@ app-release.apk
 
 Go to platform-tools:
 
-cd C:\Users\harsh\AppData\Local\Android\Sdk\platform-tools
+Replace USER_NAME with your user
+
+cd C:\Users\USER_NAME\AppData\Local\Android\Sdk\platform-tools
 
 Then install:
 
