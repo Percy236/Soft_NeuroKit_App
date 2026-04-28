@@ -1,81 +1,118 @@
-import React, { useMemo, useState } from "react";
+import { useFocusEffect } from "@react-navigation/native";
+import React, { useCallback, useMemo, useState } from "react";
 import {
-    Alert,
-    FlatList,
-    Share,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  Alert,
+  FlatList,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
-
-type DataFile = {
-  id: string;
-  name: string;
-  date: string;
-  sizeKB: number;
-};
-
-const initialFiles: DataFile[] = [
-  {
-    id: "1",
-    name: "session_2026_04_08_1530.csv",
-    date: "Apr 8, 2026 • 3:30 PM",
-    sizeKB: 1820,
-  },
-  {
-    id: "2",
-    name: "session_2026_04_07_1015.csv",
-    date: "Apr 7, 2026 • 10:15 AM",
-    sizeKB: 950,
-  },
-  {
-    id: "3",
-    name: "session_2026_04_06_1845.csv",
-    date: "Apr 6, 2026 • 6:45 PM",
-    sizeKB: 2410,
-  },
-  {
-    id: "4",
-    name: "session_2026_04_05_0910.csv",
-    date: "Apr 5, 2026 • 9:10 AM",
-    sizeKB: 620,
-  },
-  {
-    id: "5",
-    name: "session_2026_04_03_1420.csv",
-    date: "Apr 3, 2026 • 2:20 PM",
-    sizeKB: 1340,
-  },
-];
+import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
 
 type SortOption = "recent" | "oldest" | "largest" | "smallest";
+type FileInfo = {
+  size: number;
+  modificationTime: number;
+};
+
+const getDisplayFileName = (fileName: string) =>
+  fileName.replace(/_\d{3}(\.csv)$/i, "$1");
 
 export default function DataScreen() {
-  const [files, setFiles] = useState(initialFiles);
+  const [files, setFiles] = useState<string[]>([]);
+  const [fileInfoMap, setFileInfoMap] = useState<Record<string, FileInfo>>({});
   const [sortOption, setSortOption] = useState<SortOption>("recent");
+
+  const getFileInfo = useCallback(async (fileName: string) => {
+    const fileUri = FileSystem.documentDirectory + fileName;
+    const info = await FileSystem.getInfoAsync(fileUri);
+
+    return info;
+  }, []);
+
+  const loadFiles = useCallback(async () => {
+    try {
+      const fileList = await FileSystem.readDirectoryAsync(
+        FileSystem.documentDirectory!,
+      );
+
+      const csvFiles = fileList.filter((name) => name.endsWith(".csv"));
+
+      const infoMap = await csvFiles.reduce<Promise<Record<string, FileInfo>>>(
+        async (infoMapPromise, name) => {
+          const nextInfoMap = await infoMapPromise;
+          const info = await getFileInfo(name);
+
+          nextInfoMap[name] =
+            info.exists && !info.isDirectory
+              ? {
+                  size: info.size,
+                  modificationTime: info.modificationTime,
+                }
+              : {
+                  size: 0,
+                  modificationTime: 0,
+                };
+          return nextInfoMap;
+        },
+        Promise.resolve({}),
+      );
+
+      csvFiles.sort(
+        (a, b) =>
+          infoMap[b].modificationTime - infoMap[a].modificationTime,
+      );
+
+      setFiles(csvFiles);
+      setFileInfoMap(infoMap);
+    } catch (error) {
+      console.log("Error loading files:", error);
+    }
+  }, [getFileInfo]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadFiles();
+    }, [loadFiles]),
+  );
 
   const sortedFiles = useMemo(() => {
     const copied = [...files];
 
     switch (sortOption) {
       case "recent":
-        return copied.sort((a, b) => b.id.localeCompare(a.id));
+        return copied.sort(
+          (a, b) =>
+            (fileInfoMap[b]?.modificationTime ?? 0) -
+            (fileInfoMap[a]?.modificationTime ?? 0),
+        );
       case "oldest":
-        return copied.sort((a, b) => a.id.localeCompare(b.id));
+        return copied.sort(
+          (a, b) =>
+            (fileInfoMap[a]?.modificationTime ?? 0) -
+            (fileInfoMap[b]?.modificationTime ?? 0),
+        );
       case "largest":
-        return copied.sort((a, b) => b.sizeKB - a.sizeKB);
+        return copied.sort(
+          (a, b) => (fileInfoMap[b]?.size ?? 0) - (fileInfoMap[a]?.size ?? 0),
+        );
       case "smallest":
-        return copied.sort((a, b) => a.sizeKB - b.sizeKB);
+        return copied.sort(
+          (a, b) => (fileInfoMap[a]?.size ?? 0) - (fileInfoMap[b]?.size ?? 0),
+        );
       default:
         return copied;
     }
-  }, [files, sortOption]);
+  }, [fileInfoMap, files, sortOption]);
 
-  const deleteFile = (id: string, fileName: string) => {
+  const deleteFile = (fileName: string) => {
+    const displayName = getDisplayFileName(fileName);
+
     Alert.alert(
       "Delete File",
-      `Are you sure you want to delete "${fileName}"?\n\nIt will be gone permanently.`,
+      `Are you sure you want to delete "${displayName}"?\n\nIt will be gone permanently.`,
       [
         {
           text: "Cancel",
@@ -84,51 +121,89 @@ export default function DataScreen() {
         {
           text: "Delete",
           style: "destructive",
-          onPress: () => {
-            setFiles((prev) => prev.filter((file) => file.id !== id));
+          onPress: async () => {
+            try {
+              const fileUri = FileSystem.documentDirectory + fileName;
+
+              await FileSystem.deleteAsync(fileUri);
+
+              loadFiles();
+            } catch (error) {
+              Alert.alert("Delete Failed", "Unable to delete this file.");
+              console.log("Error deleting file:", error);
+            }
           },
         },
       ],
     );
   };
 
-  const exportFile = async (fileName: string) => {
+  const shareFile = async (fileName: string) => {
+    const fileUri = FileSystem.documentDirectory + fileName;
+    const displayName = getDisplayFileName(fileName);
+
     try {
-      await Share.share({
-        message: `Exporting file: ${fileName}`,
+      const canShare = await Sharing.isAvailableAsync();
+
+      if (!canShare) {
+        Alert.alert(
+          "Sharing Not Available",
+          "Sharing is not available on this device.",
+        );
+        return;
+      }
+
+      await Sharing.shareAsync(fileUri, {
+        mimeType: "text/csv",
+        UTI: "public.comma-separated-values-text",
+        dialogTitle: `Export ${displayName}`,
       });
     } catch (error) {
       Alert.alert("Export Failed", "Unable to export this file right now.");
+      console.log("Error sharing file:", error);
     }
   };
 
-  const renderFile = ({ item }: { item: DataFile }) => (
-    <View style={styles.fileHeader}>
-      <Text style={styles.fileName}>{item.name}</Text>
+  const renderFile = ({ item }: { item: string }) => {
+    const info = fileInfoMap[item];
+    const displayName = getDisplayFileName(item);
+    const sizeKB = Math.round((info?.size ?? 0) / 1024);
+    const modified = info?.modificationTime
+      ? new Date(info.modificationTime * 1000).toLocaleString()
+      : "--";
 
-      <View style={styles.actionButtons}>
-        <TouchableOpacity
-          style={styles.exportButton}
-          onPress={() => exportFile(item.name)}
-        >
-          <Text style={styles.exportButtonText}>Export</Text>
-        </TouchableOpacity>
+    return (
+      <View style={styles.fileHeader}>
+        <View style={styles.fileDetails}>
+          <Text style={styles.fileName}>{displayName}</Text>
+          <Text style={styles.fileMeta}>Size: {sizeKB} KB</Text>
+          <Text style={styles.fileMeta}>Modified: {modified}</Text>
+        </View>
 
-        <TouchableOpacity
-          style={styles.deleteButton}
-          onPress={() => deleteFile(item.id, item.name)}
-        >
-          <Text style={styles.deleteButtonText}>Delete</Text>
-        </TouchableOpacity>
+        <View style={styles.actionButtons}>
+          <TouchableOpacity
+            style={styles.exportButton}
+            onPress={() => shareFile(item)}
+          >
+            <Text style={styles.exportButtonText}>Export</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.deleteButton}
+            onPress={() => deleteFile(item)}
+          >
+            <Text style={styles.deleteButtonText}>Delete</Text>
+          </TouchableOpacity>
+        </View>
       </View>
-    </View>
-  );
+    );
+  };
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Data</Text>
       <Text style={styles.subtitle}>
-        Saved session data • {files.length}{" "}
+        Saved session data - {files.length}{" "}
         {files.length === 1 ? "file" : "files"}
       </Text>
 
@@ -202,9 +277,11 @@ export default function DataScreen() {
         </TouchableOpacity>
       </View>
 
+      <Text style={styles.sessionCount}>Saved CSV Sessions ({files.length})</Text>
+
       <FlatList
         data={sortedFiles}
-        keyExtractor={(item) => item.id}
+        keyExtractor={(item) => item}
         renderItem={renderFile}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
@@ -273,17 +350,25 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 8,
   },
+  fileDetails: {
+    flex: 1,
+    marginRight: 10,
+  },
   fileName: {
     fontSize: 15,
     fontWeight: "bold",
     color: "#0f172a",
-    flex: 1,
-    marginRight: 10,
   },
   fileMeta: {
     fontSize: 13,
     color: "#64748b",
     marginTop: 6,
+  },
+  sessionCount: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#334155",
+    marginBottom: 12,
   },
   actionButtons: {
     flexDirection: "row",

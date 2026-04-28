@@ -1,4 +1,5 @@
 import { Buffer } from "buffer";
+import * as FileSystem from "expo-file-system/legacy";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
@@ -32,7 +33,10 @@ export default function BluetoothScreen() {
   const [isTargetDevice, setIsTargetDevice] = useState(false);
 
   const [isRecording, setIsRecording] = useState(false);
+  const isRecordingRef = useRef(false);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
+  const [dataBuffer, setDataBuffer] = useState<any[]>([]);
+  const dataBufferRef = useRef<any[]>([]);
 
   const [ch3, setCh3] = useState<number | null>(null);
   const [ch4, setCh4] = useState<number | null>(null);
@@ -142,6 +146,11 @@ export default function BluetoothScreen() {
   const startRecording = () => {
     if (!characteristicRef) return;
 
+    dataBufferRef.current = [];
+    setDataBuffer([]);
+    isRecordingRef.current = true;
+    setIsRecording(true);
+
     const sub = characteristicRef.monitor((error: any, characteristic: any) => {
       if (error) {
         console.log("Notify error:", error);
@@ -160,17 +169,70 @@ export default function BluetoothScreen() {
       setCh3(ch3Val);
       setCh4(ch4Val);
 
+      if (isRecordingRef.current) {
+        const newEntry = {
+          timestamp: Date.now(),
+          ch3: ch3Val,
+          ch4: ch4Val,
+        };
+
+        dataBufferRef.current = [...dataBufferRef.current, newEntry];
+        setDataBuffer((prev) => [...prev, newEntry]);
+      }
+
       console.log("DATA:", ch3Val, ch4Val);
     });
 
     setSubscription(sub);
-    setIsRecording(true);
   };
 
-  const stopRecording = () => {
+  const saveCSV = async () => {
+    const bufferCopy =
+      dataBufferRef.current.length > 0
+        ? [...dataBufferRef.current]
+        : [...dataBuffer];
+
+    if (bufferCopy.length === 0) {
+      console.log("No data to save");
+      return;
+    }
+
+    // Create timestamp-based filename that stays unique across quick sessions.
+    const now = new Date();
+
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const day = String(now.getDate()).padStart(2, "0");
+    const hours = String(now.getHours()).padStart(2, "0");
+    const minutes = String(now.getMinutes()).padStart(2, "0");
+    const seconds = String(now.getSeconds()).padStart(2, "0");
+    const milliseconds = String(now.getMilliseconds()).padStart(3, "0");
+
+    const fileName = `session_${month}_${day}_${hours}${minutes}${seconds}_${milliseconds}.csv`;
+    const fileUri = FileSystem.documentDirectory + fileName;
+
+    // Build CSV content
+    const header = "timestamp,ch3,ch4\n";
+
+    const rows = bufferCopy
+      .map((d) => `${d.timestamp},${d.ch3},${d.ch4}`)
+      .join("\n");
+
+    const csv = header + rows;
+
+    try {
+      await FileSystem.writeAsStringAsync(fileUri, csv);
+      console.log("Saved file:", fileUri);
+    } catch (error) {
+      console.log("Error saving file:", error);
+    }
+  };
+
+  const stopRecording = async () => {
     subscription?.remove();
     setSubscription(null);
+    isRecordingRef.current = false;
     setIsRecording(false);
+    await saveCSV();
   };
 
   const disconnectDevice = async () => {
@@ -183,6 +245,7 @@ export default function BluetoothScreen() {
     setConnectedDevice(null);
     setCharacteristicRef(null);
     setIsTargetDevice(false);
+    isRecordingRef.current = false;
     setIsRecording(false);
     setCh3(null);
     setCh4(null);
